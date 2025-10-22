@@ -4,14 +4,16 @@ const qrcode = require('qrcode-terminal');
 const axios = require('axios');
 
 const app = express();
-const PORT = 3000; 
+const PORT = 3000;
 
-const API_BASE_URL = 'http://localhost:8080/api'; 
+const API_BASE_URL = 'http://localhost:8080/api';
 
-const userMap = {}; 
+const userMap = {};
+
+const userSessionState = {};
 
 const client = new Client({
-    authStrategy: new LocalAuth({ clientId: "finanzas-bot" }), 
+    authStrategy: new LocalAuth({ clientId: "finanzas-bot" }),
     puppeteer: {
         args: [
             '--no-sandbox',
@@ -41,105 +43,183 @@ client.on('disconnected', (reason) => {
 });
 
 
-async function processCommand(message) {
-    const text = message.body.trim();
+/**
+ * Processa o registro de uma transação (entrada ou saida)
+ * * @param {Message} message - O objeto 'message' ORIGINAL do whatsapp-web.js
+ * @param {string} text - O texto do comando a ser processado (ex: "entrada 100 salario")
+ */
+async function processTransaction(message, text) {
     const whatsappId = message.from;
-
-    if (text.toUpperCase().startsWith('CONECTAR ')) {
-        const finanzasUserId = text.substring(9).trim(); 
-        
-        if (finanzasUserId.length < 5) {
-            return message.reply('❌ ID de usuário inválido. Por favor, forneça o ID de usuário (UID) correto do Firebase.');
-        }
-
-        if (!/^[a-zA-Z0-9]{20,}$/.test(finanzasUserId)) {
-             return message.reply('❌ ID de usuário inválido. O ID deve ser uma string longa alfanumérica (seu UID do Firebase).');
-        }
-        
-        userMap[whatsappId] = finanzasUserId;
-        return message.reply(`✅ Conta FinanZas (${finanzasUserId}) associada com sucesso! Agora você pode registrar transações.`);
-    }
-
     const userId = userMap[whatsappId];
 
-    if (!userId) {
-        return message.reply('⚠️ Sua conta do FinanZas ainda não está conectada. Envie "CONECTAR {seu_id_usuario}" (Ex: CONECTAR A1B2C3D4E5) para começar a usar.');
-    }
-    
     const parts = text.toLowerCase().split(' ');
-    const command = parts[0]; 
+    const command = parts[0];
     const valueStr = parts[1];
-    
-    const rawDescription = parts.slice(2).join(' '); 
+
+    const rawDescription = parts.slice(2).join(' ');
     const description = rawDescription || (command === 'entrada' ? 'Entrada via WhatsApp' : 'Saída via WhatsApp');
 
-
     if (command !== 'entrada' && command !== 'saida') {
-        return message.reply('Comando não reconhecido. Use "ajuda" para ver a lista de comandos.');
+        await message.reply('Comando não reconhecido. Digite *MENU* para ver as opções.');
+        return false;
     }
 
-    const value = parseFloat(valueStr.replace(',', '.')); 
+    const value = parseFloat(valueStr.replace(',', '.'));
 
     if (isNaN(value) || value <= 0) {
-        return message.reply(`❌ Valor inválido para ${command}. Use o formato: ${command} [valor] [descrição]. Ex: entrada 100 salário`);
+        await message.reply(`❌ Valor inválido. Use o formato: [valor] [descrição].\nEx: 100 salário`);
+        return false;
     }
 
     const isEntrada = command === 'entrada';
 
     const payload = {
         descricao: description,
-        valor: value, 
-        data: new Date().toISOString().split('T')[0], 
-        ...(isEntrada 
-            ? { salario: description.toLowerCase().includes('salário') || description.toLowerCase().includes('fixo') } 
-            : { tipo: description.toLowerCase().includes('fixa') ? 'fixa' : 'variável' }), 
+        valor: value,
+        data: new Date().toISOString().split('T')[0],
+        ...(isEntrada
+            ? { salario: description.toLowerCase().includes('salário') || description.toLowerCase().includes('fixo') }
+            : { tipo: description.toLowerCase().includes('fixa') ? 'fixa' : 'variável' }),
     };
 
     const endpoint = isEntrada ? '/entradas' : '/saidas';
 
     try {
         const url = `${API_BASE_URL}${endpoint}?userId=${userId}`;
-        
+
         await axios.post(url, payload);
 
         const typeLabel = isEntrada ? 'Entrada' : 'Saída';
         const formattedValue = new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(value);
-        
+
         message.reply(`✅ ${typeLabel} de ${formattedValue} (${payload.descricao}) registrada com sucesso no FinanZas!`);
+        return true;
     } catch (error) {
         console.error('Erro ao comunicar com o Spring Boot:', error.response ? error.response.data : error.message);
-        
+
         let errorMessage = 'Erro desconhecido ao registrar a transação.';
         if (error.response && error.response.status === 404) {
             errorMessage = 'O endpoint da API não foi encontrado (404). Verifique se o backend está na URL correta e rodando na porta 8080.';
         } else if (error.message.includes('ECONNREFUSED')) {
-             errorMessage = 'Conexão recusada. O Spring Boot não está rodando no endereço especificado.';
+            errorMessage = 'Conexão recusada. O Spring Boot não está rodando no endereço especificado.';
         } else if (error.response && error.response.status === 400) {
-             errorMessage = 'Requisição inválida (400). Verifique se os dados da transação estão no formato correto.';
+            errorMessage = 'Requisição inválida (400). Verifique se os dados da transação estão no formato correto.';
         }
 
         message.reply(`❌ Ocorreu um erro: ${errorMessage}`);
+        return false;
     }
 }
 
 client.on('message', async message => {
-    const body = message.body.toLowerCase().trim();
-    if (body.startsWith('conectar') || body.startsWith('entrada') || body.startsWith('saida')) {
-        await processCommand(message);
-    } else if (body === 'ajuda') {
-         message.reply(`
-Comandos disponíveis:
-1. **Conectar conta:** CONECTAR {seu_id_usuario}
-   Ex: CONECTAR SEUID123
-2. **Registrar Entrada:** entrada [valor] [descrição/tipo]
-   Ex: entrada 2000 Salário fixo
-3. **Registrar Saída:** saida [valor] [descrição/tipo]
-   Ex: saida 45 Almoço variavel
-        `);
-    } else if (body === 'olá') {
-        message.reply('Olá! Eu sou o FinanZas Bot. Envie "ajuda" para ver a lista de comandos e "CONECTAR {seu_id_usuario}" para começar.');
+    const whatsappId = message.from;
+    const body = message.body.trim();
+    const bodyLower = body.toLowerCase();
+    
+    const session = userSessionState[whatsappId];
+    const userId = userMap[whatsappId];
+
+    const greetings = ['oi', 'olá', 'ola', 'bom dia', 'boa tarde', 'boa noite', 'eai', 'opa', 'ei'];
+
+    if (greetings.includes(bodyLower) && !userId) {
+        await message.reply(
+`Seja bem vindo(a) ao WhatsApp do FinanZas!
+Para usufruir completamente da ferramenta, entre no site https://finanzas-dev.com.br
+Realize o login/cadastro. No menu "Configurações", copie o seu "ID de Usuário (UID)".
+Cole esse ID aqui no chat da seguinte forma: 
+
+CONECTAR SEU_ID_AQUI`
+        );
+        userSessionState[whatsappId] = 'awaiting_connect';
+        return;
     }
+
+    if (body.toUpperCase().startsWith('CONECTAR ')) {
+        const finanzasUserId = body.substring(9).trim();
+
+        if (finanzasUserId.length < 5 || !/^[a-zA-Z0-9]{20,}$/.test(finanzasUserId)) {
+            await message.reply('❌ ID de usuário inválido. Verifique o ID no site (Menu > Configurações) e tente novamente. Ex: CONECTAR A1B2C3D4E5...');
+            userSessionState[whatsappId] = 'awaiting_connect';
+            return;
+        }
+
+        userMap[whatsappId] = finanzasUserId;
+        userSessionState[whatsappId] = 'in_menu'; 
+        await message.reply(`✅ Pronto, agora você está autenticado! \n\nDigite *MENU* para ver as opções.`);
+        return;
+    }
+    
+    if (!userId) {
+        await message.reply('Olá! Parece que você ainda não se conectou. Envie "oi" ou "olá" para ver as instruções de como começar.');
+        return;
+    }
+
+    if (bodyLower === 'menu' || bodyLower === 'ajuda') {
+        await message.reply(
+`*Menu Principal*
+Digite o *número* da opção desejada:
+
+1️⃣ - Registrar Entrada
+2️⃣ - Registrar Saída
+3️⃣ - Resumo Financeiro (Em breve!)
+4️⃣ - Desconectar`
+        );
+        userSessionState[whatsappId] = 'in_menu';
+        return;
+    }
+
+    if (session === 'in_menu') {
+        switch (body) {
+            case '1':
+                userSessionState[whatsappId] = 'awaiting_entrada';
+                await message.reply('Ok, vamos registrar uma *Entrada*.\n\nPor favor, digite o *valor* e a *descrição*.\n(Ex: 2000 salário)');
+                return;
+            case '2':
+                userSessionState[whatsappId] = 'awaiting_saida';
+                await message.reply('Ok, vamos registrar uma *Saída*.\n\nPor favor, digite o *valor* e a *descrição*.\n(Ex: 45 almoço)');
+                return;
+            case '3':
+                await message.reply('Esta funcionalidade ("Resumo Financeiro") ainda está em desenvolvimento. Em breve você poderá ver seu resumo por aqui!');
+                await client.emit('message', { ...message, body: 'menu' });
+                return;
+            case '4':
+                delete userMap[whatsappId];
+                delete userSessionState[whatsappId];
+                await message.reply('Sessão encerrada. Você foi desconectado. 👋\n\nPara usar o bot novamente, envie "oi".');
+                return;
+            default:
+                await message.reply('Opção inválida. Por favor, digite *MENU* para ver as opções novamente.');
+                return;
+        }
+    }
+
+    if (session === 'awaiting_entrada') {
+        const textToProcess = 'entrada ' + body;
+
+        const success = await processTransaction(message, textToProcess);
+
+        if (success) {
+            userSessionState[whatsappId] = 'in_menu';
+            await message.reply('O que deseja fazer agora? Digite *MENU* para ver as opções.');
+        }
+        
+        return;
+    }
+
+    if (session === 'awaiting_saida') {
+        const textToProcess = 'saida ' + body;
+        const success = await processTransaction(message, textToProcess);
+
+        if (success) {
+            userSessionState[whatsappId] = 'in_menu'; 
+            await message.reply('O que deseja fazer agora? Digite *MENU* para ver as opções.');
+        }
+        return;
+    }
+
+    await message.reply('Comando não reconhecido. Digite *MENU* para ver a lista de opções.');
 });
+
 
 client.initialize();
 
@@ -147,4 +227,5 @@ client.initialize();
 app.use(express.json());
 
 app.listen(PORT, () => {
+    
 });
