@@ -46,7 +46,7 @@ client.on('disconnected', (reason) => {
 /**
  * Processa o registro de uma transação (entrada ou saida)
  * * @param {Message} message - O objeto 'message' ORIGINAL do whatsapp-web.js
- * @param {string} text - O texto do comando a ser processado (ex: "entrada 100 salario")
+ * @param {string} text - O texto do comando a ser processado
  */
 async function processTransaction(message, text) {
     const whatsappId = message.from;
@@ -111,6 +111,58 @@ async function processTransaction(message, text) {
     }
 }
 
+/**
+ * Busca e envia o resumo financeiro para o usuário.
+ * @param {Message} message - O objeto 'message' ORIGINAL do whatsapp-web.js
+ */
+async function getFinancialSummary(message) {
+    const whatsappId = message.from;
+    const userId = userMap[whatsappId];
+
+    try {
+        const urlEntradas = `${API_BASE_URL}/entradas/total?userId=${userId}`;
+        const urlSaidas = `${API_BASE_URL}/saidas/total?userId=${userId}`;
+
+        const [entradasResponse, saidasResponse] = await Promise.all([
+            axios.get(urlEntradas),
+            axios.get(urlSaidas)
+        ]);
+        
+        const totalEntradas = entradasResponse.data.total;
+        const totalSaidas = saidasResponse.data.total;
+        const saldo = totalEntradas - totalSaidas;
+
+        const formatCurrency = (value) => new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(value);
+
+        const summaryMessage = 
+`*📊 Resumo Financeiro*
+
+*Entradas (Total)*: ${formatCurrency(totalEntradas)}
+*Saídas (Total)*: ${formatCurrency(totalSaidas)}
+*Saldo Atual (Entradas - Saídas)*: ${formatCurrency(saldo)}`;
+
+        await message.reply(summaryMessage);
+
+        return true;
+    } catch (error) {
+        console.error('Erro ao buscar resumo financeiro no Spring Boot:', error.response ? error.response.data : error.message);
+
+        let errorMessage = 'Erro desconhecido ao buscar o resumo financeiro.';
+        if (error.message.includes('ECONNREFUSED')) {
+            errorMessage = 'Conexão recusada. O Spring Boot não está rodando no endereço especificado.';
+        } else if (error.response && (error.response.status === 404 || error.response.status === 500)) {
+            // Este erro é comum se o Spring Boot não tiver os endpoints /entradas/total e /saidas/total implementados.
+            errorMessage = 'O endpoint da API para resumo não foi encontrado ou houve erro no servidor. Verifique se o backend está implementado para os endpoints `/entradas/total` e `/saidas/total` ou se há algum problema interno.';
+        } else if (error.response && error.response.status === 400) {
+            errorMessage = 'Requisição inválida (400). Verifique se o ID de usuário está correto.';
+        }
+        
+        message.reply(`❌ Ocorreu um erro: ${errorMessage}\n\nO que deseja fazer agora? Digite *MENU* para ver as opções.`);
+        return false;
+    }
+}
+
+
 client.on('message', async message => {
     const whatsappId = message.from;
     const body = message.body.trim();
@@ -161,7 +213,7 @@ Digite o *número* da opção desejada:
 
 1️⃣ - Registrar Entrada
 2️⃣ - Registrar Saída
-3️⃣ - Resumo Financeiro (Em breve!)
+3️⃣ - Resumo Financeiro
 4️⃣ - Desconectar`
         );
         userSessionState[whatsappId] = 'in_menu';
@@ -179,8 +231,14 @@ Digite o *número* da opção desejada:
                 await message.reply('Ok, vamos registrar uma *Saída*.\n\nPor favor, digite o *valor* e a *descrição*.\n(Ex: 45 almoço)');
                 return;
             case '3':
-                await message.reply('Esta funcionalidade ("Resumo Financeiro") ainda está em desenvolvimento. Em breve você poderá ver seu resumo por aqui!');
-                await client.emit('message', { ...message, body: 'menu' });
+                // IMPLEMENTAÇÃO DO RESUMO FINANCEIRO
+                userSessionState[whatsappId] = 'fetching_summary';
+                await message.reply('Buscando seu resumo financeiro... Aguarde um momento.');
+                const success = await getFinancialSummary(message);
+                
+                // Retorna ao menu principal após a operação
+                userSessionState[whatsappId] = 'in_menu';
+                await message.reply('O que deseja fazer agora? Digite *MENU* para ver as opções.');
                 return;
             case '4':
                 delete userMap[whatsappId];
